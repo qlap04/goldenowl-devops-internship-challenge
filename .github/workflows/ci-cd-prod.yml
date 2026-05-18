@@ -3,22 +3,22 @@ name: CI/CD Prod
 on:
   push:
     tags:
-      - '[0-9]+.[0-9]+.[0-9]+'
+      - "[0-9]+.[0-9]+.[0-9]+"
 
 env:
-  IMAGE:       kaise2004/goldenowl
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  IMAGE: kaise2004/goldenowl
   ECS_CLUSTER: goldenowl-prod-cluster
   ECS_SERVICE: goldenowl-prod-svc
-  TASK_DEF:    goldenowl-prod
-  CONTAINER:   goldenowl-prod
+  TASK_DEF: goldenowl-prod
+  CONTAINER: goldenowl-prod
 
 jobs:
-  ci:
-    name: Lint & Test & Push
+  lint:
+    name: Lint
     runs-on: ubuntu-latest
-
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: actions/setup-node@v4
         with:
@@ -34,9 +34,85 @@ jobs:
         working-directory: src
         run: npm run lint:check
 
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: src/package-lock.json
+
+      - name: Install deps
+        working-directory: src
+        run: npm ci --frozen-lockfile
+
       - name: Test
         working-directory: src
         run: npm test
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: runtime
+          push: false
+          load: true
+          tags: ${{ env.IMAGE }}:${{ github.ref_name }}
+
+      - name: Save image to tar
+        run: docker save ${{ env.IMAGE }}:${{ github.ref_name }} -o image.tar
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: image.tar
+          retention-days: 1
+
+  scan:
+    name: Scan
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+
+      - name: Load image
+        run: docker load -i image.tar
+
+      - name: Scan image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.IMAGE }}:${{ github.ref_name }}
+          severity: CRITICAL
+          exit-code: 1
+
+  push:
+    name: Push
+    runs-on: ubuntu-latest
+    needs: scan
+    steps:
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+
+      - name: Load image
+        run: docker load -i image.tar
 
       - name: Login Docker Hub
         uses: docker/login-action@v3
@@ -44,26 +120,22 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build & push image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          target: runtime
-          push: true
-          tags: ${{ env.IMAGE }}:${{ github.ref_name }}
+      - name: Push image
+        run: docker push ${{ env.IMAGE }}:${{ github.ref_name }}
 
   deploy:
     name: Deploy to ECS
     runs-on: ubuntu-latest
-    needs: ci
-    environment: production   
+    needs: push
+    environment: production
+
     steps:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region:            ap-southeast-2
+          aws-region: ap-southeast-2
 
       - name: Download current task definition
         run: |
@@ -77,15 +149,15 @@ jobs:
         uses: aws-actions/amazon-ecs-render-task-definition@v1
         with:
           task-definition: task-def.json
-          container-name:  ${{ env.CONTAINER }}
-          image:           ${{ env.IMAGE }}:${{ github.ref_name }}
+          container-name: ${{ env.CONTAINER }}
+          image: ${{ env.IMAGE }}:${{ github.ref_name }}
 
       - name: Deploy to ECS
         uses: aws-actions/amazon-ecs-deploy-task-definition@v2
         with:
           task-definition: ${{ steps.render.outputs.task-definition }}
-          service:         ${{ env.ECS_SERVICE }}
-          cluster:         ${{ env.ECS_CLUSTER }}
+          service: ${{ env.ECS_SERVICE }}
+          cluster: ${{ env.ECS_CLUSTER }}
           wait-for-service-stability: true
 
       - name: Smoke test
@@ -104,5 +176,5 @@ jobs:
             echo "Attempt ${i}/10 - status ${STATUS}, retrying..."
             sleep 15
           done
-          echo "Smoke test failed"
+          echo " Smoke test failed"
           exit 1
