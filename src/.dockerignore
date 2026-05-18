@@ -1,8 +1,26 @@
-**/node_modules/
-**/dist
+# node_modules 
+node_modules
+src/node_modules
+npm-debug.log*
+
+# Git
 .git
-npm-debug.log
+.gitignore
+
+# CI/CD & IaC 
+.github
+terraform
+
+# Env files 
+.env
+.env.*
+.aws
+
+# Test & coverage output
+coverage
 .coverage
 .coverage.*
-.env
-.aws
+.nyc_output
+
+# Docs
+*.md
